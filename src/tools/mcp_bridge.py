@@ -11,7 +11,42 @@ from mcp import StdioServerParameters
 from src.config.env import config
 
 
-MAX_TOOL_CONTENT_CHARS = 4000
+MAX_TOOL_CONTENT_CHARS = 12000
+
+
+def _normalize_tool_result_content(raw_content: Any) -> str:
+    """Convert MCP tool content objects into plain text for model consumption."""
+    if raw_content is None:
+        return ""
+
+    if isinstance(raw_content, str):
+        return raw_content
+
+    if isinstance(raw_content, list):
+        parts: list[str] = []
+        for item in raw_content:
+            text_value = getattr(item, "text", None)
+            if isinstance(text_value, str):
+                parts.append(text_value)
+                continue
+
+            if isinstance(item, dict):
+                if isinstance(item.get("text"), str):
+                    parts.append(item["text"])
+                    continue
+                if isinstance(item.get("content"), str):
+                    parts.append(item["content"])
+                    continue
+
+            parts.append(str(item))
+
+        return "\n".join(part for part in parts if part)
+
+    text_attr = getattr(raw_content, "text", None)
+    if isinstance(text_attr, str):
+        return text_attr
+
+    return str(raw_content)
 
 
 def _clip_tool_content(content: str) -> str:
@@ -26,10 +61,16 @@ def _clip_tool_content(content: str) -> str:
 
 def build_server_params() -> StdioServerParameters:
     """Build stdio server parameters for the GitHub MCP server."""
+    token = config.GITHUB_TOKEN or ""
     return StdioServerParameters(
         command=config.MCP_COMMAND,
         args=config.MCP_ARGS,
-        env={**os.environ, "GITHUB_PERSONAL_ACCESS_TOKEN": config.GITHUB_TOKEN},
+        env={
+            **os.environ,
+            "GITHUB_PERSONAL_ACCESS_TOKEN": token,
+            "GITHUB_TOKEN": token,
+            "GH_TOKEN": token,
+        },
     )
 
 
@@ -55,11 +96,10 @@ async def execute_tool_calls(session: Any, tool_calls: list[dict[str, Any]]) -> 
     for tool_call in tool_calls:
         fn_name = tool_call["function"]["name"]
         fn_args = json.loads(tool_call["function"]["arguments"])
-        print(f"Running tool: {fn_name}({fn_args})")
 
         try:
             tool_result = await session.call_tool(fn_name, fn_args)
-            content = str(tool_result.content)
+            content = _normalize_tool_result_content(getattr(tool_result, "content", None))
         except Exception as exc:
             content = f"Tool execution failed: {exc}"
 

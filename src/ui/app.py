@@ -2,90 +2,52 @@
 
 from __future__ import annotations
 
-import asyncio
 import re
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import streamlit as st
 
-from src.app_service import generate_readme_upgrade, list_public_repositories, missing_env_vars
+from src.app_service import list_public_repositories, missing_env_vars
 from src.config.env import config
 from src.tools.rate_limiter import FileRateLimiter
+from src.ui.actions import run_generation, run_readme_update
+from src.ui.history import render_history_panel, save_generation_history
+from src.ui.panels import (
+    inject_styles,
+    render_header,
+    render_help_panel,
+    render_session_panel,
+)
 
 
 NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
 RATE_LIMIT_PER_HOUR = 2
 RATE_LIMIT_WINDOW_SECONDS = 3600
+DEFAULT_MAX_ITERATIONS = 10
+IST = ZoneInfo("Asia/Kolkata")
 
 _LIMITER = FileRateLimiter(".runtime/rate_limits.json")
+
+
+def _now_ist() -> datetime:
+    return datetime.now(IST)
+
+
+def _to_ist(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        # Backward compatibility for old naive values already in session state.
+        # Treat them as UTC and convert to IST.
+        return value.replace(tzinfo=ZoneInfo("UTC")).astimezone(IST)
+    return value.astimezone(IST)
 
 
 def _is_valid_name(value: str) -> bool:
     return bool(NAME_PATTERN.match(value.strip()))
 
 
-def _inject_styles() -> None:
-    st.markdown(
-        """
-        <style>
-        [data-testid="stAppViewContainer"] {
-            background:
-                radial-gradient(circle at 10% 15%, rgba(26, 96, 255, 0.18) 0%, rgba(26, 96, 255, 0) 30%),
-                radial-gradient(circle at 85% 20%, rgba(0, 194, 168, 0.18) 0%, rgba(0, 194, 168, 0) 35%);
-        }
-        .app-hero {
-            border: 1px solid rgba(148, 163, 184, 0.35);
-            border-radius: 14px;
-            padding: 1.2rem 1.2rem 0.8rem 1.2rem;
-            background: linear-gradient(145deg, rgba(15, 23, 42, 0.68) 0%, rgba(30, 41, 59, 0.58) 100%);
-            box-shadow: 0 10px 30px rgba(2, 6, 23, 0.35);
-            margin-bottom: 1rem;
-            backdrop-filter: blur(8px);
-        }
-        .status-card {
-            border: 1px solid rgba(148, 163, 184, 0.35);
-            border-radius: 12px;
-            padding: 0.8rem 1rem;
-            background: linear-gradient(145deg, rgba(15, 23, 42, 0.6) 0%, rgba(30, 41, 59, 0.5) 100%);
-            backdrop-filter: blur(8px);
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def _render_header() -> None:
-    st.markdown(
-        """
-        <div class="app-hero">
-            <h2 style="margin-bottom:0.3rem;color:#f8fafc;">README Upgrade Studio</h2>
-            <p style="margin-top:0.2rem;color:#cbd5e1;">
-                Audit a GitHub repository and generate a stronger, production-grade README using MCP + Groq.
-            </p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def _render_sidebar() -> int:
-    st.sidebar.header("Generation Settings")
-    st.sidebar.caption(f"Model: {config.GROQ_MODEL}")
-    max_iterations = st.sidebar.slider(
-        "Max iterations",
-        min_value=3,
-        max_value=20,
-        value=10,
-        help="Higher values can improve depth but take longer.",
-    )
-    st.sidebar.markdown("---")
-    st.sidebar.write("Tip: Start with 8-10, then increase if output is incomplete.")
-    return max_iterations
-
-
-def _run_generation(repo_target: str, max_iterations: int) -> str | None:
-    return asyncio.run(generate_readme_upgrade(repo_target=repo_target, max_iterations=max_iterations))
+def _is_admin_user(username: str) -> bool:
+    return username.strip().lower() in set(config.ADMIN_GITHUB_USERS)
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -114,9 +76,21 @@ def _get_user_identifier() -> str:
 
     session_key = st.session_state.get("_session_rl_key")
     if not session_key:
-        session_key = f"session-{datetime.now().timestamp()}"
+        session_key = f"session-{_now_ist().timestamp()}"
         st.session_state["_session_rl_key"] = session_key
     return session_key
+
+
+def _get_session_started_at() -> datetime:
+    started_at = st.session_state.get("_session_started_at")
+    if isinstance(started_at, datetime):
+        normalized = _to_ist(started_at)
+        st.session_state["_session_started_at"] = normalized
+        return normalized
+
+    started_at = _now_ist()
+    st.session_state["_session_started_at"] = started_at
+    return started_at
 
 
 def main() -> None:
@@ -124,9 +98,10 @@ def main() -> None:
         page_title="README Upgrade Studio",
         page_icon="R",
         layout="wide",
+        initial_sidebar_state="collapsed",
     )
-    _inject_styles()
-    _render_header()
+    inject_styles()
+    render_header()
 
     missing = missing_env_vars()
     if missing:
@@ -135,7 +110,24 @@ def main() -> None:
             st.write(f"- {name}")
         st.stop()
 
-    max_iterations = _render_sidebar()
+    if "recent_username" not in st.session_state:
+        st.session_state["recent_username"] = ""
+    if "input_username" not in st.session_state:
+        st.session_state["input_username"] = st.session_state["recent_username"]
+
+    max_iterations = DEFAULT_MAX_ITERATIONS
+    render_help_panel()
+    st.markdown("<div style='height: 0.4rem;'></div>", unsafe_allow_html=True)
+
+    if "show_history_panel" not in st.session_state:
+        st.session_state["show_history_panel"] = False
+
+    toggle_label = "Hide History" if st.session_state["show_history_panel"] else "Show History"
+    if st.button(toggle_label, key="toggle_history_panel", use_container_width=False):
+        st.session_state["show_history_panel"] = not st.session_state["show_history_panel"]
+
+    if st.session_state["show_history_panel"]:
+        render_history_panel()
 
     col_left, col_right = st.columns([2, 1], gap="large")
     with col_left:
@@ -145,7 +137,10 @@ def main() -> None:
                 "GitHub Username",
                 placeholder="owner",
                 help="Example: octocat",
+                key="input_username",
             )
+            if username.strip():
+                st.session_state["recent_username"] = username.strip()
 
         repos: list[str] = []
         repo_error: str | None = None
@@ -187,14 +182,29 @@ def main() -> None:
         selected_repository = repository or ""
         repo_target = f"{username.strip()}/{selected_repository.strip()}"
         st.caption(f"Target: {repo_target if username or repository else 'owner/repo'}")
-        generate_clicked = st.button("Generate README V2", type="primary", use_container_width=True)
+
+        st.divider()
+        st.subheader("📝 Author Info (Optional)")
+        author_col1, author_col2 = st.columns(2)
+        with author_col1:
+            author_linkedin = st.text_input(
+                "LinkedIn Profile URL",
+                placeholder="https://linkedin.com/in/yourprofile",
+                help="Your LinkedIn profile URL for the README author section.",
+                key="input_author_linkedin",
+            )
+        with author_col2:
+            author_email = st.text_input(
+                "Email Address",
+                placeholder="your.email@gmail.com",
+                help="Your email address for the README author section.",
+                key="input_author_email",
+            )
+
+        generate_clicked = st.button("Generate README", type="primary", use_container_width=True)
 
     with col_right:
-        st.markdown('<div class="status-card">', unsafe_allow_html=True)
-        st.write("Session")
-        st.caption(f"Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        st.caption("Output can be downloaded as markdown once generated.")
-        st.markdown("</div>", unsafe_allow_html=True)
+        render_session_panel(started_at=_get_session_started_at())
 
     if generate_clicked:
         if not username.strip() or not repository:
@@ -207,36 +217,124 @@ def main() -> None:
             )
             st.stop()
 
-        user_key = _get_user_identifier()
-        rate_result = _LIMITER.consume(
-            key=user_key,
-            limit=RATE_LIMIT_PER_HOUR,
-            window_seconds=RATE_LIMIT_WINDOW_SECONDS,
-        )
-        if not rate_result.allowed:
-            wait_minutes = max(1, (rate_result.retry_after_seconds + 59) // 60)
-            st.error(
-                f"Rate limit reached: only {RATE_LIMIT_PER_HOUR} generations per hour are allowed. "
-                f"Please try again in about {wait_minutes} minute(s)."
+        if not _is_admin_user(username):
+            user_key = _get_user_identifier()
+            rate_result = _LIMITER.consume(
+                key=user_key,
+                limit=RATE_LIMIT_PER_HOUR,
+                window_seconds=RATE_LIMIT_WINDOW_SECONDS,
             )
-            st.stop()
-
-        st.info(f"Generation started. Remaining quota this hour: {rate_result.remaining}")
+            if not rate_result.allowed:
+                wait_minutes = max(1, (rate_result.retry_after_seconds + 59) // 60)
+                st.error(f"You have reached the generation limit. Please try again in about {wait_minutes} minute(s).")
+                st.stop()
+            st.info("Generation started.")
+        else:
+            st.info("Generation started.")
 
         with st.spinner("Generating improved README. This may take a minute..."):
-            content = _run_generation(repo_target=repo_target, max_iterations=max_iterations)
+            content, error_message = run_generation(
+                repo_target=repo_target,
+                max_iterations=max_iterations,
+                author_linkedin=author_linkedin.strip() if author_linkedin else None,
+                author_email=author_email.strip() if author_email else None,
+            )
 
         if not content:
-            st.error("No content was generated. Try increasing max iterations or narrowing repository scope.")
+            if error_message:
+                st.error(error_message)
+            else:
+                st.error("No content was generated. Try increasing max iterations or narrowing repository scope.")
             st.stop()
 
         st.success("README generated successfully.")
+        generated_at = _now_ist()
+        st.session_state["generated_content"] = content
+        st.session_state["generated_repo_target"] = repo_target
+        st.session_state["generated_at"] = generated_at.strftime("%Y-%m-%d %H:%M:%S IST")
+        history_key = save_generation_history(repo_target=repo_target, content=content, generated_at=generated_at)
+        st.session_state["generated_history_file"] = history_key
+
+    generated_content = st.session_state.get("generated_content")
+    generated_repo_target = st.session_state.get("generated_repo_target")
+
+    if generated_content and generated_repo_target:
+        if "is_editing_generated" not in st.session_state:
+            st.session_state["is_editing_generated"] = False
+        if "generated_draft_content" not in st.session_state:
+            st.session_state["generated_draft_content"] = generated_content
+
+        # Keep draft synced with fresh generation when not actively editing.
+        if not st.session_state["is_editing_generated"]:
+            st.session_state["generated_draft_content"] = generated_content
+
         st.subheader("Generated Content")
-        st.markdown(content)
+
+        action_col1, action_col2, action_col3 = st.columns([1, 1, 3])
+        with action_col1:
+            if st.button("Edit README", key="edit_generated_readme", use_container_width=True):
+                st.session_state["is_editing_generated"] = True
+                st.session_state["generated_draft_content"] = st.session_state.get("generated_content", "")
+        with action_col2:
+            if st.button("Cancel Edit", key="cancel_generated_edit", use_container_width=True):
+                st.session_state["is_editing_generated"] = False
+                st.session_state["generated_draft_content"] = st.session_state.get("generated_content", "")
+
+        if st.session_state["is_editing_generated"]:
+            st.text_area(
+                "Edit README Markdown",
+                key="generated_draft_content",
+                height=420,
+                help="Changes are temporary until you click Save Changes.",
+            )
+            if st.button("Save Changes", key="save_generated_edit", use_container_width=True):
+                st.session_state["generated_content"] = st.session_state.get("generated_draft_content", "")
+                st.session_state["is_editing_generated"] = False
+                st.success("Changes saved locally. You can now preview, download, or update GitHub.")
+
+        preview_mode = st.radio(
+            "Preview mode",
+            options=["Rendered", "Raw Markdown"],
+            horizontal=True,
+            key="generated_preview_mode",
+        )
+        if preview_mode == "Raw Markdown":
+            st.code(st.session_state.get("generated_content", ""), language="markdown")
+        else:
+            st.markdown(st.session_state.get("generated_content", ""))
+        st.caption(f"Repository: {generated_repo_target}")
+        if st.session_state.get("generated_history_file"):
+            st.caption(f"Saved in history: {st.session_state['generated_history_file']}")
+
+        commit_message = st.text_input(
+            "Commit message for README update",
+            value="docs: update README via README Upgrade Studio",
+            help="This commit message will be used when updating README.md via MCP.",
+        )
+        branch_name = st.text_input(
+            "Branch name",
+            value="main",
+            help="Target branch for the README update.",
+        )
+
+        update_clicked = st.button("Update README.md in GitHub Repository", use_container_width=True)
+        if update_clicked:
+            with st.spinner("Updating README.md through MCP..."):
+                ok, update_message = run_readme_update(
+                    repo_target=generated_repo_target,
+                    content=st.session_state.get("generated_content", ""),
+                    commit_message=commit_message.strip() or "docs: update README",
+                    branch=branch_name.strip() or "main",
+                )
+            if ok:
+                st.success(update_message)
+            else:
+                st.error(update_message)
+
         st.download_button(
-            label="Download README_V2.md",
-            data=content,
-            file_name="README_V2.md",
+            label="Download README.md",
+            data=st.session_state.get("generated_content", ""),
+            file_name="README.md",
             mime="text/markdown",
             use_container_width=True,
         )

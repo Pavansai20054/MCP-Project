@@ -31,7 +31,9 @@ Before you start, ensure you have:
 - **Node.js 16+** (required for GitHub MCP server)
 - Two API keys:
   - **Groq API Key** → [Get one free](https://console.groq.com)
-  - **GitHub Personal Access Token** → [Create here](https://github.com/settings/tokens) (requires `repo` scope)
+  - **GitHub Personal Access Token** → [Create here](https://github.com/settings/tokens)
+    - Fine-grained token (recommended): repository access + `Contents: Read and write`
+    - Classic token: `repo` scope
 
 ---
 
@@ -144,7 +146,7 @@ GitHub Repository
        │   • Extracts architecture & config details
        │   • Flags security concerns
        │
-       └→ [Output] Professional README v2.0
+       └→ [Output] Professional README
 ```
 
 **Key Flow:**
@@ -176,7 +178,7 @@ MCP_ARGS = ["-y", "@modelcontextprotocol/server-github"]
 
 ```bash
 # Analyze a popular open-source project
-python -m src.main --repo facebook/react --max-iterations 15 --output react_readme_v2.md
+python -m src.main --repo facebook/react --max-iterations 15 --output react_readme.md
 
 # Dry-run with fewer iterations (faster)
 python -m src.main --repo your-org/your-project --max-iterations 5
@@ -201,6 +203,55 @@ python -m src.main --repo your-org/your-project --max-iterations 5
 | `No content generated`                   | Increase `--max-iterations` or check Groq API quota                 |
 | `Streamlit not found`                    | Run `pip install -r requirements.txt` again                         |
 | `Node.js error in MCP`                   | Verify Node.js 16+ is installed: `node --version`                   |
+
+### Fix: README update returns `Not Found`
+
+If you see errors like:
+
+```text
+create_or_update_file: Not Found
+push_files: Not Found
+GitHub API update failed (404): Not Found
+```
+
+this is usually a token-permission issue (GitHub often returns `404` for write-denied operations).
+
+#### Step 1: Open GitHub token settings
+
+Go to: <https://github.com/settings/tokens>
+
+#### Step 2: Create or update your token
+
+- Fine-grained token (recommended):
+  - Repository access: select your repository (or all repositories)
+  - Permissions: set `Contents` to `Read and write`
+- Classic token:
+  - Enable `repo` scope
+
+#### Step 3: Update your `.env`
+
+Use the new token in your project root `.env` file:
+
+```env
+GROQ_API_KEY=your_groq_api_key_here
+GITHUB_PERSONAL_ACCESS_TOKEN=your_new_github_token_here
+```
+
+#### Step 4: Restart the app
+
+Restart is required so the new token is loaded:
+
+```bash
+streamlit run generator.py
+```
+
+#### Why this happens
+
+`Not Found` during update does not always mean the repository is missing. It can also mean:
+
+- the token can read the repository but cannot write contents
+- repository access is restricted for the token
+- token scopes/permissions are incomplete
 
 ---
 

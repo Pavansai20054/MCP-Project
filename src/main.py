@@ -66,13 +66,16 @@ async def main() -> None:
     print(f"Using model: {config.GROQ_MODEL}")
     print(f"Auditing repository: {repo_target}")
 
-    final_content = await generate_readme_upgrade(
+    final_content, error_message = await generate_readme_upgrade(
         repo_target=repo_target,
         max_iterations=args.max_iterations,
     )
 
     if not final_content:
-        print("No content generated. Try increasing --max-iterations.")
+        if error_message:
+            print(f"Generation failed: {error_message}")
+        else:
+            print("No content generated. Try increasing --max-iterations.")
         return
 
     print("\n" + "=" * 50)

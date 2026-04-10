@@ -16,4 +16,11 @@ class Config:
     MCP_COMMAND = "npx"
     MCP_ARGS = ["-y", "@modelcontextprotocol/server-github"]
 
+    # Optional comma-separated admin GitHub usernames that bypass UI rate limits.
+    ADMIN_GITHUB_USERS = tuple(
+        user.strip().lower()
+        for user in os.getenv("ADMIN_GITHUB_USERS", "PAVANSAI-1902").split(",")
+        if user.strip()
+    )
+
 config = Config()
