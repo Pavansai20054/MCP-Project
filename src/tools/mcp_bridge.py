@@ -59,9 +59,9 @@ def _clip_tool_content(content: str) -> str:
     )
 
 
-def build_server_params() -> StdioServerParameters:
+def build_server_params(github_token: str | None = None) -> StdioServerParameters:
     """Build stdio server parameters for the GitHub MCP server."""
-    token = config.GITHUB_TOKEN or ""
+    token = (github_token or config.GITHUB_TOKEN or "").strip()
     return StdioServerParameters(
         command=config.MCP_COMMAND,
         args=config.MCP_ARGS,

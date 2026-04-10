@@ -16,13 +16,14 @@ from src.orchestrator import run_readme_upgrade
 from src.tools.mcp_bridge import build_server_params, to_groq_tools
 
 
-def _build_github_headers() -> dict[str, str]:
+def _build_github_headers(github_token: str | None = None) -> dict[str, str]:
     headers = {
         "Accept": "application/vnd.github+json",
         "User-Agent": "readme-upgrade-studio",
     }
-    if config.GITHUB_TOKEN:
-        headers["Authorization"] = f"Bearer {config.GITHUB_TOKEN}"
+    token = (github_token or config.GITHUB_TOKEN or "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     return headers
 
 
@@ -31,10 +32,11 @@ async def generate_readme_upgrade(
     max_iterations: int,
     author_linkedin: str | None = None,
     author_email: str | None = None,
+    github_token: str | None = None,
 ) -> tuple[str | None, str | None]:
     """Generate upgraded README content for a target repository."""
-    server_params = build_server_params()
-    repo_snapshot = fetch_repo_snapshot(repo_target)
+    server_params = build_server_params(github_token=github_token)
+    repo_snapshot = fetch_repo_snapshot(repo_target, github_token=github_token)
 
     async with stdio_client(server_params) as (read, write):
         async with ClientSession(read, write) as session:
@@ -61,16 +63,14 @@ def missing_env_vars() -> list[str]:
     missing: list[str] = []
     if not config.GROQ_API_KEY:
         missing.append("GROQ_API_KEY")
-    if not config.GITHUB_TOKEN:
-        missing.append("GITHUB_PERSONAL_ACCESS_TOKEN")
     return missing
 
 
-def list_public_repositories(username: str) -> tuple[list[str], str | None]:
+def list_public_repositories(username: str, github_token: str | None = None) -> tuple[list[str], str | None]:
     """Return all public repository names for a GitHub username."""
     repos: list[str] = []
     page = 1
-    headers = _build_github_headers()
+    headers = _build_github_headers(github_token)
 
     with httpx.Client(timeout=20.0, headers=headers) as client:
         while True:
@@ -99,14 +99,14 @@ def list_public_repositories(username: str) -> tuple[list[str], str | None]:
     return repos, None
 
 
-def fetch_repo_snapshot(repo_target: str) -> str | None:
+def fetch_repo_snapshot(repo_target: str, github_token: str | None = None) -> str | None:
     """Fetch concise repository context to reduce hallucinations in README generation."""
     parsed = _parse_repo_target(repo_target)
     if not parsed:
         return None
 
     owner, repo = parsed
-    headers = _build_github_headers()
+    headers = _build_github_headers(github_token)
 
     try:
         with httpx.Client(timeout=20.0, headers=headers) as client:
@@ -418,9 +418,9 @@ def _normalize_text_for_compare(value: str) -> str:
     return value.replace("\r\n", "\n").rstrip()
 
 
-def _check_repo_write_access(owner: str, repo: str) -> tuple[bool, str | None]:
+def _check_repo_write_access(owner: str, repo: str, github_token: str | None = None) -> tuple[bool, str | None]:
     """Check whether the configured token can push to this repository."""
-    headers = _build_github_headers()
+    headers = _build_github_headers(github_token)
     if "Authorization" not in headers:
         return False, "GitHub token is missing. Set GITHUB_PERSONAL_ACCESS_TOKEN."
 
@@ -449,9 +449,14 @@ def _check_repo_write_access(owner: str, repo: str) -> tuple[bool, str | None]:
         return False, str(exc)
 
 
-def _resolve_update_branch(owner: str, repo: str, requested_branch: str) -> tuple[str | None, str | None]:
+def _resolve_update_branch(
+    owner: str,
+    repo: str,
+    requested_branch: str,
+    github_token: str | None = None,
+) -> tuple[str | None, str | None]:
     """Resolve an update branch that exists, with fallback to repository default branch."""
-    headers = _build_github_headers()
+    headers = _build_github_headers(github_token)
     try:
         with httpx.Client(timeout=20.0, headers=headers) as client:
             repo_resp = client.get(f"https://api.github.com/repos/{owner}/{repo}")
@@ -478,8 +483,14 @@ def _resolve_update_branch(owner: str, repo: str, requested_branch: str) -> tupl
         return None, str(exc)
 
 
-def _verify_readme_updated(owner: str, repo: str, branch: str, expected_content: str) -> tuple[bool, str | None]:
-    headers = _build_github_headers()
+def _verify_readme_updated(
+    owner: str,
+    repo: str,
+    branch: str,
+    expected_content: str,
+    github_token: str | None = None,
+) -> tuple[bool, str | None]:
+    headers = _build_github_headers(github_token)
     try:
         with httpx.Client(timeout=20.0, headers=headers) as client:
             resp = client.get(
@@ -508,9 +519,10 @@ def _update_readme_via_github_api(
     branch: str,
     readme_content: str,
     commit_message: str,
+    github_token: str | None = None,
 ) -> tuple[bool, str]:
     """Fallback path that updates README.md directly with the GitHub Contents API."""
-    headers = _build_github_headers()
+    headers = _build_github_headers(github_token)
     if "Authorization" not in headers:
         return False, "GitHub token is required for direct README updates."
 
@@ -557,7 +569,13 @@ def _update_readme_via_github_api(
                     error_message = put_resp.text[:220]
                 return False, f"GitHub API update failed ({put_resp.status_code}): {error_message}"
 
-            verified, verify_error = _verify_readme_updated(owner, repo, branch, readme_content)
+            verified, verify_error = _verify_readme_updated(
+                owner,
+                repo,
+                branch,
+                readme_content,
+                github_token=github_token,
+            )
             if not verified:
                 return False, f"GitHub API update completed but verification failed ({verify_error})"
 
@@ -683,6 +701,7 @@ async def update_repository_readme(
     readme_content: str,
     commit_message: str,
     branch: str = "main",
+    github_token: str | None = None,
 ) -> tuple[bool, str]:
     """Update README.md in a GitHub repository via MCP server write tools."""
     parsed = _parse_repo_target(repo_target)
@@ -690,7 +709,7 @@ async def update_repository_readme(
         return False, "Invalid repository target. Use owner/repo format."
 
     owner, repo = parsed
-    resolved_branch, branch_error = _resolve_update_branch(owner, repo, branch)
+    resolved_branch, branch_error = _resolve_update_branch(owner, repo, branch, github_token=github_token)
     if not resolved_branch:
         return False, f"Unable to resolve target branch for update. {branch_error or ''}".strip()
 
@@ -701,11 +720,12 @@ async def update_repository_readme(
         branch=resolved_branch,
         readme_content=readme_content,
         commit_message=commit_message,
+        github_token=github_token,
     )
     if api_ok:
         return True, api_message
 
-    server_params = build_server_params()
+    server_params = build_server_params(github_token=github_token)
 
     async with stdio_client(server_params) as (read, write):
         async with ClientSession(read, write) as session:
@@ -765,6 +785,7 @@ async def update_repository_readme(
                             repo=repo,
                             branch=resolved_branch,
                             expected_content=readme_content,
+                            github_token=github_token,
                         )
                         if not verified:
                             failures.append(f"{tool.name}: write call returned but verification failed ({verify_error})")

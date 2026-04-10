@@ -51,8 +51,8 @@ def _is_admin_user(username: str) -> bool:
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def _get_repositories_for_user(username: str) -> tuple[list[str], str | None]:
-    return list_public_repositories(username)
+def _get_repositories_for_user(username: str, github_token: str | None = None) -> tuple[list[str], str | None]:
+    return list_public_repositories(username, github_token=github_token)
 
 
 def _get_user_identifier() -> str:
@@ -114,6 +114,8 @@ def main() -> None:
         st.session_state["recent_username"] = ""
     if "input_username" not in st.session_state:
         st.session_state["input_username"] = st.session_state["recent_username"]
+    if "input_github_token" not in st.session_state:
+        st.session_state["input_github_token"] = ""
 
     max_iterations = DEFAULT_MAX_ITERATIONS
     render_help_panel()
@@ -128,6 +130,18 @@ def main() -> None:
 
     if st.session_state["show_history_panel"]:
         render_history_panel()
+
+    st.subheader("🔐 GitHub Personal Access Token (Required)")
+    st.text_input(
+        "Enter your GitHub token",
+        type="password",
+        placeholder="ghp_xxx...",
+        help="Create at https://github.com/settings/tokens with Contents: Read and write permission.",
+        key="input_github_token",
+    )
+    effective_github_token = (st.session_state.get("input_github_token") or "").strip() or (config.GITHUB_TOKEN or "").strip()
+    if not effective_github_token:
+        st.caption("Token is required for repo analysis and README update.")
 
     col_left, col_right = st.columns([2, 1], gap="large")
     with col_left:
@@ -146,7 +160,7 @@ def main() -> None:
         repo_error: str | None = None
         if username.strip() and _is_valid_name(username):
             with st.spinner("Fetching public repositories..."):
-                repos, repo_error = _get_repositories_for_user(username.strip())
+                repos, repo_error = _get_repositories_for_user(username.strip(), github_token=effective_github_token)
 
         with form_col2:
             if username.strip() and not _is_valid_name(username):
@@ -211,6 +225,10 @@ def main() -> None:
             st.warning("Please enter both GitHub username and repository name.")
             st.stop()
 
+        if not effective_github_token:
+            st.warning("Please provide a GitHub Personal Access Token to generate and update README.")
+            st.stop()
+
         if not _is_valid_name(username) or not _is_valid_name(repository):
             st.warning(
                 "Only letters, numbers, dot (.), underscore (_) and hyphen (-) are allowed in username/repository."
@@ -238,6 +256,7 @@ def main() -> None:
                 max_iterations=max_iterations,
                 author_linkedin=author_linkedin.strip() if author_linkedin else None,
                 author_email=author_email.strip() if author_email else None,
+                github_token=effective_github_token,
             )
 
         if not content:
@@ -319,12 +338,16 @@ def main() -> None:
 
         update_clicked = st.button("Update README.md in GitHub Repository", use_container_width=True)
         if update_clicked:
+            if not effective_github_token:
+                st.error("GitHub token is required to update README in repository.")
+                st.stop()
             with st.spinner("Updating README.md through MCP..."):
                 ok, update_message = run_readme_update(
                     repo_target=generated_repo_target,
                     content=st.session_state.get("generated_content", ""),
                     commit_message=commit_message.strip() or "docs: update README",
                     branch=branch_name.strip() or "main",
+                    github_token=effective_github_token,
                 )
             if ok:
                 st.success(update_message)

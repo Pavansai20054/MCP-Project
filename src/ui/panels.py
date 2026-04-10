@@ -138,11 +138,25 @@ def render_help_panel() -> None:
                 <ol style="margin:0;padding-left:1.1rem;display:grid;gap:0.45rem;">
                     <li>Enter a GitHub username.</li>
                     <li>Select one of the public repositories that appears.</li>
+                    <li>Paste your GitHub Personal Access Token in the token field.</li>
                     <li>(Optional) Add LinkedIn profile URL and email for the Author section.</li>
                     <li>Click Generate README.</li>
                     <li>Review output in Rendered/Raw mode, edit if needed, then Save Changes.</li>
                     <li>Use Update README.md to push to GitHub or Download README.md.</li>
                 </ol>
+                <div style="margin-top:0.9rem;padding-top:0.85rem;border-top:1px solid rgba(148,163,184,0.18);">
+                    <strong style="color:#f8fafc;">How to create GitHub token (2 minutes):</strong>
+                    <ol style="margin:0.5rem 0 0;padding-left:1.1rem;display:grid;gap:0.35rem;">
+                        <li>Open <a href="https://github.com/settings/tokens" target="_blank" rel="noopener noreferrer" style="color:#93c5fd;">github.com/settings/tokens</a>.</li>
+                        <li>Click Generate new token.</li>
+                        <li>Recommended: choose Fine-grained token.</li>
+                        <li>Repository access: select your target repository (or All repositories).</li>
+                        <li>Set permission <strong>Contents</strong> to <strong>Read and write</strong>.</li>
+                        <li>Generate token, copy it once, and paste it in this app.</li>
+                    </ol>
+                    <div style="margin-top:0.45rem;">
+                        Classic token alternative: enable <strong>repo</strong> scope.
+                    </div>
                 </div>
                 <div style="margin-top:0.55rem;">
                     Tip: if output misses details, regenerate once and compare versions from history.
