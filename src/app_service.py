@@ -37,25 +37,43 @@ async def generate_readme_upgrade(
     """Generate upgraded README content for a target repository."""
     server_params = build_server_params(github_token=github_token)
     repo_snapshot = fetch_repo_snapshot(repo_target, github_token=github_token)
+    try:
+        async with stdio_client(server_params) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                tools_res = await session.list_tools()
+                groq_tools = to_groq_tools(tools_res.tools)
 
-    async with stdio_client(server_params) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            tools_res = await session.list_tools()
-            groq_tools = to_groq_tools(tools_res.tools)
-
-            generated_content, error_message = await run_readme_upgrade(
-                session=session,
-                repo_target=repo_target,
-                groq_tools=groq_tools,
-                max_iterations=max_iterations,
-                repo_snapshot=repo_snapshot,
-                author_linkedin=author_linkedin,
-                author_email=author_email,
-            )
-            if generated_content:
-                generated_content = _apply_deterministic_tech_stack(generated_content, repo_snapshot)
-            return generated_content, error_message
+                generated_content, error_message = await run_readme_upgrade(
+                    session=session,
+                    repo_target=repo_target,
+                    groq_tools=groq_tools,
+                    max_iterations=max_iterations,
+                    repo_snapshot=repo_snapshot,
+                    author_linkedin=author_linkedin,
+                    author_email=author_email,
+                )
+                if generated_content:
+                    generated_content = _apply_deterministic_tech_stack(generated_content, repo_snapshot)
+                return generated_content, error_message
+    except FileNotFoundError:
+        # Deployment environments may not have npx/node. Fallback to snapshot-only generation.
+        generated_content, error_message = await run_readme_upgrade(
+            session=None,
+            repo_target=repo_target,
+            groq_tools=[],
+            max_iterations=max_iterations,
+            repo_snapshot=repo_snapshot,
+            author_linkedin=author_linkedin,
+            author_email=author_email,
+        )
+        if generated_content:
+            generated_content = _apply_deterministic_tech_stack(generated_content, repo_snapshot)
+            return generated_content, None
+        return None, (
+            "MCP runtime is unavailable in this deployment (missing npx/node), and fallback generation also failed. "
+            f"Details: {error_message or 'Unknown error.'}"
+        )
 
 
 def missing_env_vars() -> list[str]:
@@ -727,80 +745,86 @@ async def update_repository_readme(
 
     server_params = build_server_params(github_token=github_token)
 
-    async with stdio_client(server_params) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            tools_res = await session.list_tools()
+    try:
+        async with stdio_client(server_params) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                tools_res = await session.list_tools()
 
-            preferred_file_tools = {"create_or_update_file", "update_file", "push_files", "create_file"}
-            write_tools = []
-            for tool in tools_res.tools:
-                tool_name = tool.name.lower()
-                if tool.name in preferred_file_tools:
-                    write_tools.append(tool)
-                    continue
-                if "file" in tool_name and any(token in tool_name for token in ("create", "update", "push")):
-                    write_tools.append(tool)
+                preferred_file_tools = {"create_or_update_file", "update_file", "push_files", "create_file"}
+                write_tools = []
+                for tool in tools_res.tools:
+                    tool_name = tool.name.lower()
+                    if tool.name in preferred_file_tools:
+                        write_tools.append(tool)
+                        continue
+                    if "file" in tool_name and any(token in tool_name for token in ("create", "update", "push")):
+                        write_tools.append(tool)
 
-            preferred_order = ["create_or_update_file", "update_file", "push_files", "create_file"]
-            write_tools.sort(
-                key=lambda tool: (
-                    next((idx for idx, name in enumerate(preferred_order) if name == tool.name), len(preferred_order)),
-                    tool.name,
-                )
-            )
-
-            if not write_tools:
-                return False, "No writable GitHub MCP tool was found to update README.md."
-
-            failures: list[str] = []
-
-            for tool in write_tools:
-                input_schema = tool.inputSchema if isinstance(tool.inputSchema, dict) else {}
-                properties = input_schema.get("properties", {}) if isinstance(input_schema, dict) else {}
-                candidates = _build_candidate_arguments(
-                    tool_name=tool.name,
-                    properties=properties if isinstance(properties, dict) else {},
-                    owner=owner,
-                    repo=repo,
-                    readme_content=readme_content,
-                    commit_message=commit_message,
-                    branch=resolved_branch,
+                preferred_order = ["create_or_update_file", "update_file", "push_files", "create_file"]
+                write_tools.sort(
+                    key=lambda tool: (
+                        next((idx for idx, name in enumerate(preferred_order) if name == tool.name), len(preferred_order)),
+                        tool.name,
+                    )
                 )
 
-                for args in candidates:
-                    try:
-                        tool_result = await session.call_tool(tool.name, args)
-                        result_content = str(getattr(tool_result, "content", ""))
-                        
-                        if not result_content:
-                            failures.append(f"{tool.name}: empty response")
-                            continue
-                        if "error" in result_content.lower():
-                            failures.append(f"{tool.name}: {result_content[:220]}")
-                            continue
-                        
-                        verified, verify_error = _verify_readme_updated(
-                            owner=owner,
-                            repo=repo,
-                            branch=resolved_branch,
-                            expected_content=readme_content,
-                            github_token=github_token,
-                        )
-                        if not verified:
-                            failures.append(f"{tool.name}: write call returned but verification failed ({verify_error})")
-                            continue
-                        return True, "README.md updated successfully in GitHub repository."
-                    except Exception as exc:
-                        exc_str = str(exc)
-                        # Truncate long error messages but keep key details
-                        if len(exc_str) > 200:
-                            exc_str = exc_str[:200] + "..."
-                        failures.append(f"{tool.name}: {exc_str}")
+                if not write_tools:
+                    return False, "No writable GitHub MCP tool was found to update README.md."
 
-            failure_preview = " | ".join(failures[:3]) if failures else "No tool call attempts were made."
-            return (
-                False,
-                f"Failed to update README for {owner}/{repo} on branch '{resolved_branch}'. "
-                f"GitHub API: {api_message} | MCP: {failure_preview}",
-            )
+                failures: list[str] = []
+
+                for tool in write_tools:
+                    input_schema = tool.inputSchema if isinstance(tool.inputSchema, dict) else {}
+                    properties = input_schema.get("properties", {}) if isinstance(input_schema, dict) else {}
+                    candidates = _build_candidate_arguments(
+                        tool_name=tool.name,
+                        properties=properties if isinstance(properties, dict) else {},
+                        owner=owner,
+                        repo=repo,
+                        readme_content=readme_content,
+                        commit_message=commit_message,
+                        branch=resolved_branch,
+                    )
+
+                    for args in candidates:
+                        try:
+                            tool_result = await session.call_tool(tool.name, args)
+                            result_content = str(getattr(tool_result, "content", ""))
+
+                            if not result_content:
+                                failures.append(f"{tool.name}: empty response")
+                                continue
+                            if "error" in result_content.lower():
+                                failures.append(f"{tool.name}: {result_content[:220]}")
+                                continue
+
+                            verified, verify_error = _verify_readme_updated(
+                                owner=owner,
+                                repo=repo,
+                                branch=resolved_branch,
+                                expected_content=readme_content,
+                                github_token=github_token,
+                            )
+                            if not verified:
+                                failures.append(f"{tool.name}: write call returned but verification failed ({verify_error})")
+                                continue
+                            return True, "README.md updated successfully in GitHub repository."
+                        except Exception as exc:
+                            exc_str = str(exc)
+                            # Truncate long error messages but keep key details
+                            if len(exc_str) > 200:
+                                exc_str = exc_str[:200] + "..."
+                            failures.append(f"{tool.name}: {exc_str}")
+
+                failure_preview = " | ".join(failures[:3]) if failures else "No tool call attempts were made."
+                return (
+                    False,
+                    f"Failed to update README for {owner}/{repo} on branch '{resolved_branch}'. "
+                    f"GitHub API: {api_message} | MCP: {failure_preview}",
+                )
+    except FileNotFoundError:
+        return (
+            False,
+            f"GitHub API update failed and MCP runtime is unavailable (missing npx/node). GitHub API details: {api_message}",
+        )
